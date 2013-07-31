@@ -191,6 +191,102 @@ and <tt>torque_submit_workers</tt>.
 are simple shell scripts, so you can edit them directly if you would
 like to change batch options or other details.
 
+<h2>Resources Categories</h2>
+
+Makeflow has the capability of automatically setting the cores, memory,
+and disk space requirements to the underlying batch system (currently this only
+works with Work Queue and Condor). Jobs are grouped into <em> job categories
+</em>, and jobs in the same category have the same cores, memory, and disk
+requirements.
+<br>
+<br>
+
+Job categories and resources are specified with variables.  Jobs are assigned
+to the category named in the value of the variable CATEGORY.  Likewise, the
+values of the variables CORES, MEMORY (in MB), and DISK (in MB) describe the
+resources requirements for the category specified in CATEGORY.
+<br>
+<br>
+
+Jobs without an explicit category are assigned to <tt>default</tt>.
+Jobs in the default category get their resource requirements from the value of
+the environment variables CORES, MEMORY, and DISK.
+<br>
+<br>
+
+Consider the following example:
+
+<pre>
+MEMORY=100
+one: src
+    cmd
+
+CATEGORY="simulation"
+DISK=500
+
+CATEGORY="preprocessing"
+MEMORY=200
+DISK=200
+
+two: src
+    cmd
+
+three: src
+    cmd
+
+CATEGORY="simulation"
+DISK=700
+four: src
+    cmd
+
+five: src
+@CATEGORY="preprocessing"
+    cmd
+
+six: src
+    cmd
+
+CATEGORY="analysis"
+CORES=1
+MEMORY=400
+DISK=400
+
+seven: src
+    cmd
+</pre>
+
+<pre>
+export CORES=4
+makeflow ...
+</pre>
+
+<h6> Job categories (job named after its output): </h6>
+
+<dl>
+<dt> preprocessing: </dt>
+<dd> two, three, five </dd>
+<dt> simulation: </dt>
+<dd> four, six </dd>
+<dt> analysis: </dt>
+<dd> seven </dd>
+<dt> default: </dt>
+<dd> one </dd>
+<tr>
+
+<h6> Resources specified: </h6>
+<table>
+<th><tr><td> Category </td> <td> Cores </td> <td> Memory (MB) </td> <td> Disk (MB) </td> </tr></th>
+<tr><td> preprocessing </td> <td> - </td> <td> 200 </td> <td> 200 </td> </tr>
+<tr><td> simulation </td> <td> - </td> <td> - </td> <td> 700 </td> </tr>
+<tr><td> analysis </td> <td> 1 </td> <td> 400 </td> <td> 400 </td> </tr>
+<tr><td> default_category </td> <td> 4 </td> <td> 100 </td> <td> - </td> </tr>
+</table>
+
+<p> Note that in this example, in job <tt>five</tt>, the CATEGORY temporarily
+has the value of "preprocessing", and then it is re-established to "simulation"
+(so that <tt>four</tt> and <tt>six</tt> belong to the same category). This is
+done using rule lexical scoping, explained in the next section.
+
 <h2>The Fine Details</h2>
 
 The Makeflow language is very similar to Make, but it does have a few important differences that you should be aware of.
@@ -232,96 +328,31 @@ Makeflow does not support all of the syntax that you find in various versions of
 
 Certain jobs don't make much sense to distribute.  For example, if you have a very fast running job that consumes a large amount of data, then it should simply run on the same machine as Makeflow.  To force this, simply add the word <tt>LOCAL</tt> to the beginning of the command line in the rule.
 
-<h3>Jobs Categories</h3>
+<h3>Rule Lexical Scope</h3>
 
-Makeflow has the capability of automatically setting the cores, memory,
-and disk space requirements to the underlying batch system (currently this only
-works with Work Queue and Condor). Jobs are grouped into <em> job categories
-</em>, and jobs in the same category have the same cores, memory, and disk
-requirements.
-<br>
-<br>
-
-Job categories and resources are specified with variables.  Jobs are assigned
-to the category named in the value of the variable CATEGORY.  Likewise, the
-values of the variables CORES, MEMORY (in MB), and DISK (in MB) describe the
-resources requirements for the category specified in CATEGORY.
-<br>
-<br>
-
-Jobs without an explicit category are assigned to <tt>default_category</tt>.
-Jobs in the default category get their resource requirements from the value of
-the environment variables CORES, MEMORY, and DISK.
-<br>
-<br>
-
-Consider the following example:
+Variables in Makeflow have global scope, that is, once defined,
+their value can be accessed from any rule. Sometimes it is useful to
+define a variable locally inside a rule, without affecting the global value. In
+Makeflow, this can be achieved by defining the variables after the rule's
+requirements, but before the rule's command, and prepending the name of the
+variable with <tt>@</tt>, as follows:
 
 <pre>
-MEMORY=100
-one: src
-    cmd
+SOME_VARIABLE=original_value
 
-CATEGORY="potatoe"
-DISK=500
+#rule 1 target_1: source_1
+	command_1
 
-CATEGORY="buzz"
-MEMORY=200
-DISK=200
+#rule 2 target_2: source_2
+@SOME_VARIABLE=local_value_for_2
+	command_2
 
-two: src
-    cmd
+#rule 3 target_3: source_3
+	command_3 </pre>
 
-three: src
-    cmd
+In this example, SOME_VARIABLE has the value 'original_value' for rules 1 and
+3, and the value 'local_value_for_2' for rule 2.
 
-CATEGORY="potatoe"
-DISK=700
-four: src
-    cmd
-
-five: src
-@CATEGORY="buzz"
-    cmd
-
-six: src
-    cmd
-
-CATEGORY="woody"
-CORES=1
-MEMORY=400
-DISK=400
-
-seven: src
-    cmd
-</pre>
-
-<pre>
-export CORES=4
-makeflow ...
-</pre>
-
-<h6> Job categories (job named after its output): </h6>
-
-<dl>
-<dt> buzz: </dt>
-<dd> two, three, five </dd>
-<dt> potatoe: </dt>
-<dd> four, six </dd>
-<dt> woody: </dt>
-<dd> seven </dd>
-<dt> default_category: </dt>
-<dd> one </dd>
-<tr>
-
-<h6> Resources specified: </h6>
-<table>
-<th><tr><td> Category </td> <td> Cores </td> <td> Memory (MB) </td> <td> Disk (MB) </td> </tr></th>
-<tr><td> buzz </td> <td> - </td> <td> 200 </td> <td> 200 </td> </tr>
-<tr><td> potatoe </td> <td> - </td> <td> - </td> <td> 700 </td> </tr>
-<tr><td> woody </td> <td> 1 </td> <td> 400 </td> <td> 400 </td> </tr>
-<tr><td> default_category </td> <td> 4 </td> <td> - </td> <td> - </td> </tr>
-</table>
 
 <h3>Batch Job Refinement</h3>
 

@@ -4,21 +4,6 @@ This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
 
-/*
-The following major problems must be fixed in the worker
-before it can be released:
-
-- Currently, all tasks sent are started immediately.  Instead, the
-worker should queue up all tasks sent, and only start them
-when the total cores, tasks, and memory are within the specified limits.
-
-- When the user does not specify any resources explicitly for a
-task, both the master and the worker should assume that the task
-occupies the entire resources of a given worker.
-
-*/
-
-
 #include "work_queue.h"
 #include "work_queue_protocol.h"
 #include "work_queue_internal.h"
@@ -464,18 +449,22 @@ static int handle_tasks(struct link *master) {
 	int result = 0;
 	struct work_queue_file *tf;
 	char dirname[WORK_QUEUE_LINE_MAX];
+	int status;
 	
 	itable_firstkey(active_tasks);
 	while(itable_nextkey(active_tasks, (UINT64_T*)&pid, (void**)&ti)) {
-		result = wait4(pid, &ti->status, WNOHANG, &ti->rusage);
+		result = wait4(pid, &status, WNOHANG, &ti->rusage);
 		if(result) {
 			if(result < 0) {
 				debug(D_WQ, "Error checking on child process (%d).", ti->pid);
 				abort_flag = 1;
 				return 0;
 			}
-			if (!WIFEXITED(ti->status)){
+			if (!WIFEXITED(status)){
 				debug(D_WQ, "Task (process %d) did not exit normally.\n", ti->pid);
+				ti->status = WTERMSIG(status);
+			} else {
+				ti->status = WEXITSTATUS(status);
 			}
 			
 			ti->execution_end = timestamp_get();
@@ -484,7 +473,7 @@ static int handle_tasks(struct link *master) {
 			itable_remove(stored_tasks, ti->taskid);
 			itable_firstkey(active_tasks);
 			
-			if(WIFEXITED(ti->status)) {
+			if(WIFEXITED(status)) {
 				sprintf(dirname, "t.%d", ti->taskid);
 				list_first_item(ti->task->output_files);
 				while((tf = (struct work_queue_file *)list_next_item(ti->task->output_files))) {
@@ -1683,7 +1672,6 @@ static void show_help(const char *cmd)
 {
 	fprintf(stdout, "Use: %s [options] <masterhost> <port>\n", cmd);
 	fprintf(stdout, "where options are:\n");
-	fprintf(stdout, " %-30s Enable auto mode. In this mode the worker\n", "-a,--advertise");
 	fprintf(stdout, " %-30s would ask a catalog server for available masters.\n", "");
 	fprintf(stdout, " %-30s Name of a preferred project. A worker can have multiple preferred\n", "-M,--master-name=<name>"); 
 	fprintf(stdout, " %-30s projects.\n", ""); 
@@ -1719,7 +1707,7 @@ static void show_help(const char *cmd)
 	fprintf(stdout, " %-30s Set the location for creating the working directory of the worker.\n", "-s,--workdir=<path>");
 	fprintf(stdout, " %-30s Show version string\n", "-v,--version");
 	fprintf(stdout, " %-30s Set the percent chance a worker will decide to shut down every minute.\n", "--volatility=<chance>");
-	fprintf(stdout, " %-30s Set the multiplier for how long outgoing and incoming data transfers\n", "--bandwidth=<mult>");
+	fprintf(stdout, " %-30s Set the maximum bandwidth the foreman will consume in Mbps. (default=unlimited)\n", "--bandwidth=<mbps>");
 	fprintf(stdout, " %-30s take.\n", "");
 	fprintf(stdout, " %-30s Set the number of cores reported by this worker.  Set to 0 to have the\n", "--cores=<n>");
 	fprintf(stdout, " %-30s worker automatically measure. (default=%d)\n", "", manual_cores_option);
@@ -1850,6 +1838,7 @@ int main(int argc, char *argv[])
 	while((c = getopt_long(argc, argv, "aB:cC:d:f:F:t:j:o:p:M:N:P:w:i:b:z:A:O:s:vZ:h", long_options, 0)) != (char) -1) {
 		switch (c) {
 		case 'a':
+            //Left here for backwards compatibility
 			auto_worker = 1;
 			break;
 		case 'B':

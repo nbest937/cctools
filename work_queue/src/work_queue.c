@@ -255,12 +255,14 @@ static int get_worker_cores(struct work_queue *q, struct work_queue_worker *w) {
 static int get_worker_state(struct work_queue *q, struct work_queue_worker *w) {
 	if(!strcmp(w->hostname, "unknown")) {
 		return WORKER_STATE_INIT;
-	} else if(get_worker_cores(q, w) && !w->cores_allocated ) {
+	} else if(get_worker_cores(q, w) && itable_size(w->current_tasks) == 0 ) {
 		return WORKER_STATE_READY;
-	} else if(w->cores_allocated < get_worker_cores(q,w)) {
-		return WORKER_STATE_BUSY;
-	} else {
-		return WORKER_STATE_FULL;
+	} else if(get_worker_cores(q, w) && itable_size(w->current_tasks) > 0) {
+		if(get_worker_cores(q, w) > w->cores_allocated || w->resources->disk.total > w->disk_allocated || w->resources->memory.total < w->memory_allocated) {
+			return WORKER_STATE_BUSY;
+		} else {
+			return WORKER_STATE_FULL;
+		}
 	}
 	return WORKER_STATE_NONE;
 }
@@ -3453,7 +3455,12 @@ void work_queue_get_stats(struct work_queue *q, struct work_queue_stats *s)
 	effective_workers = get_num_of_effective_workers(q);
 	s->start_time = q->start_time;
 	wall_clock_time = timestamp_get() - q->start_time;
-	s->efficiency = (long double) (q->total_execute_time) / (wall_clock_time * effective_workers);
+
+	if(effective_workers < 1 || wall_clock_time == 0)
+		s->efficiency = 0;
+	else
+		s->efficiency = (long double) (q->total_execute_time) / (wall_clock_time * effective_workers);
+
 	s->idle_percentage = get_idle_percentage(q);
 	// Estimate master capacity, i.e. how many workers can this master handle
 	s->capacity = q->capacity;
