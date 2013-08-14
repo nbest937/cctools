@@ -45,14 +45,15 @@ struct dag *dag_create()
 		d->remote_jobs_running = 0;
 		d->remote_jobs_max = MAX_REMOTE_JOBS_DEFAULT;
 		d->nodeid_counter = 0;
-		d->collect_table = hash_table_create(0, 0);
+		d->collect_table = set_create(0);
 		d->export_list = list_create();
 
 		d->task_categories = hash_table_create(0, 0);
 
-		/* Add _MAKEFLOW_COLLECT_LIST to variables table to ensure it is in
+		/* Add GC_*_LIST to variables table to ensure it is in
 		 * global DAG scope. */
-		hash_table_insert(d->variables, "_MAKEFLOW_COLLECT_LIST", xxstrdup(""));
+		hash_table_insert(d->variables, "GC_COLLECT_LIST", dag_variable_value_create(""));
+		hash_table_insert(d->variables, "GC_PRESERVE_LIST", dag_variable_value_create(""));
 
 		memset(d->node_states, 0, sizeof(int) * DAG_NODE_STATE_MAX);
 		return d;
@@ -240,6 +241,8 @@ struct dag_file *dag_file_lookup_or_create(struct dag *d, const char *filename)
 	f->needed_by = list_create(0);
 	f->target_of = NULL;
 
+	f->ref_count = 0;
+
 	hash_table_insert(d->file_table, f->filename, (void *) f);
 
 	return f;
@@ -269,42 +272,112 @@ struct list *dag_input_files(struct dag *d)
  * */
 char *dag_lookup_set(const char *name, void *arg)
 {
-	struct dag_lookup_set s = { (struct dag *) arg, NULL, NULL };
-	return dag_lookup(name, &s);
+	struct dag_lookup_set s = { (struct dag *) arg, NULL, NULL, NULL };
+	return dag_lookup_str(name, &s);
 }
 
-char *dag_lookup(const char *name, void *arg)
+struct dag_variable_value *dag_lookup(const char *name, void *arg)
 {
 	struct dag_lookup_set *s = (struct dag_lookup_set *) arg;
-	const char *value;
+	struct dag_variable_value *v;
 
 	if(s) {
 		/* Try node variables table */
 		if(s->node) {
-			value = (const char *) hash_table_lookup(s->node->variables, name);
-			if(value) {
-				s->table = s->node->variables;
-				return xxstrdup(value);
+			v = (struct dag_variable_value *) hash_table_lookup(s->node->variables, name);
+			if(v) {
+				s->table = s->node->variables; //why this line?
+				return v;
+			}
+		}
+
+		/* Try variables from category */
+		if(s->category) {
+			v = (struct dag_variable_value *) hash_table_lookup(s->category->variables, name);
+			if(v) {
+				s->table = s->category->variables;
+				return v;
 			}
 		}
 
 		/* Try dag variables table */
 		if(s->dag) {
-			value = (const char *) hash_table_lookup(s->dag->variables, name);
-			if(value) {
+			v = (struct dag_variable_value *) hash_table_lookup(s->dag->variables, name);
+			if(v) {
 				s->table = s->dag->variables;
-				return xxstrdup(value);
+				return v;
 			}
 		}
 	}
 
 	/* Try environment */
-	value = getenv(name);
+	char *value = getenv(name);
 	if(value) {
-		return xxstrdup(value);
+		return dag_variable_value_create(value);
 	}
 
 	return NULL;
+}
+
+char *dag_lookup_str(const char *name, void *arg)
+{
+	struct dag_variable_value *v = dag_lookup(name, arg);
+
+	if(v)
+		return xxstrdup(v->value);
+	else
+		return NULL;
+}
+
+struct dag_variable_value *dag_variable_value_create(const char *value)
+{
+	struct dag_variable_value *v = malloc(sizeof(struct dag_variable_value));
+
+	v->len  = strlen(value);
+	v->size = v->len + 1;
+
+	v->value = malloc(v->size * sizeof(char));
+
+	strcpy(v->value, value);
+
+	return v;
+}
+
+void dag_variable_value_free(struct dag_variable_value *v)
+{
+	free(v->value);
+	free(v);
+}
+
+struct dag_variable_value *dag_variable_value_append_or_create(struct dag_variable_value *v, const char *value)
+{
+	if(!v)
+		return dag_variable_value_create(value);
+
+	int nlen = strlen(value);
+	int req  = v->len + nlen + 2;   // + 2 for ' ' and '\0'
+
+	if( req > v->size )
+	{
+		//make size for string to be appended, plus some more, so we do not
+		//need to reallocate for a while.
+		int nsize = req > 2*(v->size) ? 2*req : 2*(v->size);
+		char *new_val = realloc(v->value, nsize*sizeof(char));
+		if(!new_val)
+			fatal("Could not allocate memory for makeflow variable value: %s\n", value);
+
+		v->size  = nsize;
+		v->value = new_val;
+	}
+
+	//add separating space
+	*(v->value + v->len) = ' ';
+
+	//append new string
+	strcpy(v->value + v->len + 1, value);
+	v->len = v->len + nlen + 1;
+
+	return v;
 }
 
 const char *dag_node_state_name(dag_node_state_t state)
@@ -369,6 +442,8 @@ void dag_node_add_source_file(struct dag_node *n, const char *filename, char *re
 
 	/* register this file as a requirement of the node */
 	list_push_head(source->needed_by, n);
+
+	source->ref_count++;
 }
 
 /* Adds the local name as a target of the node, and register the
@@ -446,7 +521,8 @@ struct dag_task_category *dag_task_category_lookup_or_create(struct dag *d, cons
 	if(!category) {
 		category = malloc(sizeof(struct dag_task_category));
 		category->label = xxstrdup(label);
-		category->count = 0;
+		category->nodes = list_create();
+		category->variables = hash_table_create(0, 0);
 		category->resources = make_rmsummary(-1);
 		
 		hash_table_insert(d->task_categories, label, category);
@@ -484,6 +560,40 @@ char *dag_task_category_wrap_as_wq_options(struct dag_task_category *category, c
 			s->cores             > -1 ? s->cores             : -1,
 			s->resident_memory   > -1 ? s->resident_memory   : -1,
 			s->workdir_footprint > -1 ? s->workdir_footprint : -1);
+
+	return options;
+}
+
+char *dag_task_category_wrap_as_rmonitor_options(struct dag_task_category *category)
+{
+	struct rmsummary *s;
+
+	s = category->resources;
+
+	char *options = NULL;
+	char *opt;
+
+	if( s->cores > -1 )
+	{
+		opt = string_format("%s -L'cores: %" PRId64 "' ", options ? options : "", s->cores ); 
+		if(options)
+			free(options);
+		options = opt;
+	}
+	if( s->resident_memory > -1 )
+	{
+		opt = string_format("%s -L'resident_memory: %" PRId64 "' ", options ? options : "", s->resident_memory ); 
+		if(options)
+			free(options);
+		options = opt;
+	}
+	if( s->workdir_footprint > -1 )
+	{
+		opt = string_format("%s -L'workdir_footprint: %" PRId64 "' ", options ? options : "", s->workdir_footprint ); 
+		if(options)
+			free(options);
+		options = opt;
+	}
 
 	return options;
 }
@@ -582,6 +692,7 @@ char *dag_task_category_wrap_options(struct dag_task_category *category, const c
 	switch(batch_type)
 	{
 		case BATCH_QUEUE_TYPE_WORK_QUEUE:
+		case BATCH_QUEUE_TYPE_WORK_QUEUE_SHAREDFS:
 			return dag_task_category_wrap_as_wq_options(category, default_options);
 			break;
 		case BATCH_QUEUE_TYPE_CONDOR:
@@ -620,3 +731,5 @@ int dag_node_is_sink(struct dag_node *n)
 {
 	return (set_size(n->descendants) == 0);
 }
+
+

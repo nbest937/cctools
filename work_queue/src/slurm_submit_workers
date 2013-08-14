@@ -104,7 +104,7 @@ do
 		--cores)  
 			shift
 			cores=$1
-			if [ $cores == "0" ]; then
+			if [ $cores = "0" ]; then
 			    parameters="$parameters --exclusive"
 			else
 			    parameters="$parameters --cpus-per-task $cores"

@@ -7,6 +7,7 @@ See the file COPYING for details.
 #include <stdio.h>
 
 #include "itable.h"
+#include "set.h"
 
 #include "timestamp.h"
 #include "batch_job.h"
@@ -44,8 +45,7 @@ struct dag {
                                                 the final cleanup). */
     struct hash_table *variables;            /* Mappings between variables defined in the makeflow 
                                                 file and their substitution. */
-    struct hash_table *collect_table;        /* Keeps the reference counts of filenames of files 
-                                                that are garbage collectable. */
+    struct set *collect_table;               /* Keeps files that are garbage collectable. */
     struct list *export_list;                /* List of variables with prefix export. 
                                                 (these are setenv'ed eventually). */
     FILE *logfile;
@@ -65,7 +65,6 @@ struct dag {
 struct lexer_book
 {
 	struct dag *d;                      /* The dag being built. */
-	int    monitor_mode;                /* Whether we need to wrap the monitor, boolean. */
 
 	struct dag_task_category *category; /* Indicates the category to which the rules belong. The
 					       idea is to have rules that perform similar tasks, or
@@ -104,7 +103,8 @@ struct dag_task_category
 {
 	char *label;
 	struct rmsummary *resources;
-	int  count;
+	struct list *nodes;
+	struct hash_table *variables;
 };
 
 /* struct dag_node implements a linked list of nodes. A dag_node
@@ -183,17 +183,28 @@ struct dag_file {
 
     struct list     *needed_by;              /* List of nodes that have this file as a source */
     struct dag_node *target_of;              /* The node (if any) that created the file */
+
+	int    ref_count;                        /* How many nodes still to run need this file */
 };
 
 struct dag_lookup_set {
     struct dag *dag;
+    struct dag_task_category *category;
     struct dag_node *node;
     struct hash_table *table;
+};
+
+
+struct dag_variable_value {
+	int   size;                             /* memory size allocated for value */
+	int   len;                              /* records strlen(value) */
+	char *value;
 };
 
 struct dag *dag_create();
 struct dag_node *dag_node_create(struct dag *d, int linenum);
 struct dag_file *dag_file_create(struct dag_node *n, const char *filename, const char *remotename);
+struct dag_file *dag_file_lookup_or_create(struct dag *d, const char *filename);
 
 struct list *dag_input_files(struct dag *d);
 
@@ -218,11 +229,18 @@ char *dag_node_translate_filename(struct dag_node *n, const char *filename);
 char *dag_file_remote_name(struct dag_node *n, const char *filename);
 int dag_file_isabsolute(const struct dag_file *f);
 
-char *dag_lookup(const char *name, void *arg);
+struct dag_variable_value *dag_lookup(const char *name, void *arg);
 char *dag_lookup_set(const char *name, void *arg);
+char *dag_lookup_str(const char *name, void *arg);
+
+struct dag_variable_value *dag_variable_value_create(const char *value);
+void dag_variable_value_free(struct dag_variable_value *v);
+struct dag_variable_value *dag_variable_value_append_or_create(struct dag_variable_value *v, const char *value);
 
 struct dag_task_category *dag_task_category_lookup_or_create(struct dag *d, const char *label);
 char *dag_task_category_wrap_options(struct dag_task_category *category, const char *default_options, batch_queue_type_t batch_type);
+char *dag_task_category_wrap_as_rmonitor_options(struct dag_task_category *category);
+
 void dag_task_category_get_env_resources(struct dag_task_category *category);
 void dag_task_category_print_debug_resources(struct dag_task_category *category);
 
